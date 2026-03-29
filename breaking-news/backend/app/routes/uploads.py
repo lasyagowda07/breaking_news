@@ -3,7 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Header, BackgroundTasks, Depends
 from jose import jwt, JWTError
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.core.config import SECRET_KEY, UPLOAD_DIR
 from app.db.database import get_session
@@ -79,3 +79,71 @@ async def upload_csv(
         message="CSV uploaded and pipeline started",
         pipeline_run_id=pipeline_run.id,
     )
+
+
+@router.get("/{upload_id}")
+def get_upload(
+    upload_id: int,
+    session: Session = Depends(get_session),
+):
+    upload = session.get(Upload, upload_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    return {
+        "id": upload.id,
+        "filename": upload.filename,
+        "file_path": upload.file_path,
+        "uploaded_at": upload.uploaded_at,
+        "row_count": upload.row_count,
+        "column_count": upload.column_count,
+        "status": upload.status,
+        "validation_message": upload.validation_message,
+    }
+
+
+@router.delete("/{upload_id}")
+def delete_upload(
+    upload_id: int,
+    authorization: Optional[str] = Header(default=None),
+    session: Session = Depends(get_session),
+):
+    verify_token(authorization)
+
+    upload = session.get(Upload, upload_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    if upload.file_path and os.path.exists(upload.file_path):
+        os.remove(upload.file_path)
+
+    session.delete(upload)
+    session.commit()
+
+    return {"message": "Upload deleted successfully", "upload_id": upload_id}
+
+
+@router.post("/rebuild")
+def rebuild_from_uploads(
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(default=None),
+    session: Session = Depends(get_session),
+):
+    verify_token(authorization)
+
+    pipeline_run = PipelineRun(
+        status="queued",
+        current_stage="queued",
+        progress_percent=0,
+        message="Manual rebuild requested.",
+    )
+    session.add(pipeline_run)
+    session.commit()
+    session.refresh(pipeline_run)
+
+    background_tasks.add_task(process_all_uploads, pipeline_run.id)
+
+    return {
+        "message": "Rebuild started",
+        "pipeline_run_id": pipeline_run.id,
+    }
